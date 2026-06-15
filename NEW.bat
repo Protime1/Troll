@@ -18,7 +18,7 @@ set PASS=174885
 set WEBHOOK_MAIN=https://discord.com/api/webhooks/1515686655850450965/gdcx_35rsHaMEBSRdvUp-nPPAgdEpw3amotXTh5tLJ6acoHEPrwGb4ISFAofuvrzuA7q
 set WEBHOOK_BACKUP=https://discord.com/api/webhooks/1516017539220504596/XGTm5OTYeNeQ1w8RONoDP5Z82rbTsFqu9rO-BZv78GoLQGfqlC0YbWZD1zSa34-NiaMN
 set CHANNEL_ID=1515684713677852783
-set BOT_TOKEN=MTUxNTc2MDc4MjMyMTc4Mjc4NA.GBbe2R.HWCGKJ3shNw2kjnh0xdeEKC_rwIewBARStD9gM
+set BOT_TOKEN=MTUxNTc2MDc4MjMyMTc4Mjc4NA.GzHGt7.3ETXlPU1HKaijcvFao1WWjn-oh8XsEHXJED-d8
 
 :: Проверка настроек
 if "%WEBHOOK_MAIN%"=="https://discord.com/api/webhooks/ТВОЙ_ID/ТВОЙ_ТОКЕН" (
