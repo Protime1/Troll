@@ -15,10 +15,10 @@ if %errorLevel% neq 0 (
 :: НАСТРОЙКИ
 :: ============================================================
 set PASS=174885
-set WEBHOOK_MAIN=https://discord.com/api/webhooks/ТВОЙ_ID/ТВОЙ_ТОКЕН
-set WEBHOOK_BACKUP=https://discord.com/api/webhooks/ЗАПАСНОЙ_ID/ЗАПАСНОЙ_ТОКЕН
-set CHANNEL_ID=ТВОЙ_ID_КАНАЛА
-set BOT_TOKEN=ТВОЙ_ТОКЕН_БОТА
+set WEBHOOK_MAIN=https://discord.com/api/webhooks/1515686655850450965/gdcx_35rsHaMEBSRdvUp-nPPAgdEpw3amotXTh5tLJ6acoHEPrwGb4ISFAofuvrzuA7q
+set WEBHOOK_BACKUP=https://discord.com/api/webhooks/1516017539220504596/XGTm5OTYeNeQ1w8RONoDP5Z82rbTsFqu9rO-BZv78GoLQGfqlC0YbWZD1zSa34-NiaMN
+set CHANNEL_ID=1515684713677852783
+set BOT_TOKEN=MTUxNTc2MDc4MjMyMTc4Mjc4NA.GWJA7R.-OuicxAGF918-qyF9jxDy04hzbpQc7uAsdnRAI
 
 :: Проверка настроек
 if "%WEBHOOK_MAIN%"=="https://discord.com/api/webhooks/ТВОЙ_ID/ТВОЙ_ТОКЕН" (
