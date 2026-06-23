@@ -252,10 +252,10 @@ if ($Tpm -and $Tpm.TpmPresent -and $Tpm.TpmReady) {
         $FullPath = $_.FullName
         $Ext = $_.Extension.ToLower()
         
-        # Проверяем исключения папок
+        # Проверяем исключения папок (исправлено: -like вместо StartsWith)
         $Excluded = $false
         foreach ($ExDir in $ExcludeDirs) {
-            if ($FullPath.StartsWith($ExDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ($FullPath -like "*$ExDir*") {
                 $Excluded = $true
                 break
             }
